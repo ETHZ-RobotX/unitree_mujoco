@@ -1,38 +1,50 @@
 cmake_minimum_required(VERSION 3.16)
-project(unitree_mujoco)
+project(a2_mujoco)
 
-if (CMAKE_BUILD_TYPE MATCHES "Debug")
-  message("Debug mode")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -g -O0 -fPIC")
-else()
-  message("Release mode")
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17 -O3 -DNDEBUG -fPIC")
-endif()
+find_package(ament_cmake REQUIRED)
+
+# Set C++ standard. Build type flags (e.g., -O3, -g) are handled by CMake/ament.
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 list(APPEND CMAKE_PREFIX_PATH "/opt/unitree_robotics/lib/cmake")
 find_package(unitree_sdk2 REQUIRED)
 find_package(Boost REQUIRED COMPONENTS program_options)
 
-
-include_directories(
-  mujoco/include
-  mujoco/simulate
-  src/lodepng
-)
-link_directories(mujoco/lib)
-
 file(GLOB SIM_SRC
   src/joystick/joystick.cc
-
-  # exclude mujoco/simulate/main.cc
   mujoco/simulate/glfw_*.cc
   mujoco/simulate/platform_*.cc
   mujoco/simulate/simulate.cc
   src/lodepng/lodepng.cpp
 )
 
-link_libraries(
-  pthread
+add_executable(a2_mujoco ${SIM_SRC} src/main.cc)
+
+set_target_properties(a2_mujoco PROPERTIES
+  # This ensures the installed executable can find its shared library dependencies.
+  # $ORIGIN refers to the executable's own directory.
+  BUILD_WITH_INSTALL_RPATH TRUE
+  INSTALL_RPATH "$ORIGIN:/opt/unitree_robotics/lib"
+)
+
+# Force the linker to use RPATH instead of RUNPATH. This ensures the Unitree 
+# libraries are always loaded *before* the ROS 2 libraries in LD_LIBRARY_PATH.
+target_link_options(a2_mujoco PRIVATE "-Wl,--disable-new-dtags")
+
+# Use target_* commands to scope includes and links to specific targets.
+target_include_directories(a2_mujoco PRIVATE
+  mujoco/include
+  mujoco/simulate
+  src/lodepng
+  src
+)
+
+
+target_link_directories(a2_mujoco PRIVATE mujoco/lib)
+
+target_link_libraries(a2_mujoco
+  pthread # Note: Using target_link_libraries is preferred over link_libraries in ROS 2
   mujoco
   glfw
   yaml-cpp
@@ -41,6 +53,30 @@ link_libraries(
   fmt
 )
 
-add_executable(unitree_mujoco ${SIM_SRC} src/main.cc)
-
 add_executable(jstest src/joystick/jstest.cc src/joystick/joystick.cc)
+
+# --- INSTALLATION RULES ---
+# This moves the binaries to the 'lib' folder of your install workspace
+install(TARGETS
+  a2_mujoco
+  jstest
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install the local MuJoCo libraries alongside the executable
+install(DIRECTORY mujoco/lib/
+  DESTINATION lib/${PROJECT_NAME}
+  FILES_MATCHING PATTERN "libmujoco.so*"
+)
+
+# Install the config file
+install(FILES config.yaml
+  DESTINATION share/${PROJECT_NAME}
+)
+
+ament_package()
+
+# Install the launch file
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)

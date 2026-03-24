@@ -28,6 +28,7 @@
 #include <new>
 #include <string>
 #include <thread>
+#include <filesystem>
 
 #include <mujoco/mujoco.h>
 #include "simulate.h"
@@ -519,6 +520,7 @@ namespace
             {
               sim.AddToHistory();
             }
+            
           }
 
           // paused
@@ -573,6 +575,7 @@ void PhysicsThread(mj::Simulate *sim, const char *filename)
 
 void *UnitreeSdk2BridgeThread(void *arg)
 {
+  std::recursive_mutex* sim_mtx = static_cast<std::recursive_mutex*>(arg);
   // Wait for mujoco data
   while (true)
   {
@@ -595,9 +598,9 @@ void *UnitreeSdk2BridgeThread(void *arg)
   
   std::unique_ptr<UnitreeSDK2BridgeBase> interface = nullptr;
   if (m->nu > NUM_MOTOR_IDL_GO) {
-    interface = std::make_unique<G1Bridge>(m, d);
+    interface = std::make_unique<G1Bridge>(m, d, sim_mtx);
   } else {
-    interface = std::make_unique<Go2Bridge>(m, d);
+    interface = std::make_unique<Go2Bridge>(m, d, sim_mtx);
   }
   interface->start();
   
@@ -671,19 +674,45 @@ int main(int argc, char **argv)
   mjv_defaultPerturb(&pert);
 
   // Load simulation configuration
-  std::filesystem::path proj_dir = std::filesystem::path(getExecutableDir()).parent_path();
-  param::config.load_from_yaml(proj_dir / "config.yaml");
-  param::helper(argc, argv);
-  if(param::config.robot_scene.is_relative()) {
-    param::config.robot_scene = proj_dir.parent_path() / "unitree_robots" / param::config.robot / param::config.robot_scene;
+  std::filesystem::path exec_dir(getExecutableDir());
+  std::filesystem::path install_prefix = exec_dir.empty() ? "." : exec_dir.parent_path().parent_path();
+  std::filesystem::path a2_mujoco_share = install_prefix / "share" / "a2_mujoco";
+  param::config.load_from_yaml(a2_mujoco_share / "config.yaml");
+
+  // ROS 2 launch appends '--ros-args' and ROS-specific arguments to the command line.
+  // We truncate the argc passed to boost::program_options to hide them.
+  int app_argc = argc;
+  for (int i = 0; i < argc; ++i) {
+    if (std::string(argv[i]) == "--ros-args") {
+      app_argc = i;
+      break;
+    }
   }
+  param::helper(app_argc, argv);
+
+  if(param::config.robot_scene.is_relative()) {
+    std::filesystem::path a2_description_share = install_prefix / "share" / "a2_description";
+    if (!std::filesystem::exists(a2_description_share)) {
+      // Fallback for isolated colcon builds
+      a2_description_share = install_prefix.parent_path() / "a2_description" / "share" / "a2_description";
+    }
+    param::config.robot_scene = a2_description_share / "mjcf" / param::config.robot_scene;
+  }
+
+  // --- Prevent Unitree DDS vs ROS 2 DDS Conflicts ---
+  // Disable Iceoryx shared memory in CycloneDDS to prevent memory corruption crashes
+  setenv("CYCLONEDDS_URI", "<CycloneDDS><Domain><Iceoryx><Enable>false</Enable></Iceoryx><SharedMemory><Enable>false</Enable></SharedMemory></Domain></CycloneDDS>", 1);
+  // Clear ROS 2 environment variables that might confuse Unitree's built-in DDS
+  unsetenv("ROS_DISTRO");
+  unsetenv("AMENT_PREFIX_PATH");
+  unsetenv("CMAKE_PREFIX_PATH");
 
   // simulate object encapsulates the UI
   auto sim = std::make_unique<mj::Simulate>(
     std::make_unique<mj::GlfwAdapter>(),
     &cam, &opt, &pert, /* is_passive = */ false);
 
-  std::thread unitree_thread(UnitreeSdk2BridgeThread, nullptr);
+  std::thread unitree_thread(UnitreeSdk2BridgeThread, &sim->mtx);
 
   // start physics thread
   std::thread physicsthreadhandle(&PhysicsThread, sim.get(), param::config.robot_scene.c_str());
