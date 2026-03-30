@@ -20,6 +20,12 @@
 
 #define MOTOR_SENSOR_NUM 3
 
+struct LidarPoint {
+    float x, y, z;
+    float dist;
+    float nx, ny, nz;
+};
+
 class UnitreeSDK2BridgeBase
 {
 public:
@@ -404,24 +410,19 @@ public:
         if (mj_data_->time >= next_lidar_time_) {
             next_lidar_time_ = mj_data_->time + 1.0 / lidar_publish_rate_;
 
-            int body_id = mj_name2id(mj_model_, mjOBJ_BODY, "torso_link");
-            if (body_id < 0) {
-                body_id = mj_name2id(mj_model_, mjOBJ_BODY, "base_link");
-            }
+            int body_id = mj_name2id(mj_model_, mjOBJ_SITE, "lidar_site");
 
             if (body_id >= 0) {
                 mjtNum pnt[3] = {
-                    mj_data_->xpos[3 * body_id + 0],
-                    mj_data_->xpos[3 * body_id + 1],
-                    mj_data_->xpos[3 * body_id + 2] + 0.2
+                    mj_data_->site_xpos[3 * body_id + 0],
+                    mj_data_->site_xpos[3 * body_id + 1],
+                    mj_data_->site_xpos[3 * body_id + 2]
                 };
 
                 // Rotate local ray directions to global for mj_multiRay
-                mjtNum* xmat = mj_data_->xmat + 9 * body_id;
+                mjtNum* site_xmat = mj_data_->site_xmat + 9 * body_id;
                 for (int i = 0; i < nray_; i++) {
-                    ray_vecs_[3 * i + 0] = xmat[0] * local_ray_vecs_[3 * i + 0] + xmat[1] * local_ray_vecs_[3 * i + 1] + xmat[2] * local_ray_vecs_[3 * i + 2];
-                    ray_vecs_[3 * i + 1] = xmat[3] * local_ray_vecs_[3 * i + 0] + xmat[4] * local_ray_vecs_[3 * i + 1] + xmat[5] * local_ray_vecs_[3 * i + 2];
-                    ray_vecs_[3 * i + 2] = xmat[6] * local_ray_vecs_[3 * i + 0] + xmat[7] * local_ray_vecs_[3 * i + 1] + xmat[8] * local_ray_vecs_[3 * i + 2];
+                    mju_mulMatVec3(ray_vecs_.data() + 3 * i, site_xmat, local_ray_vecs_.data() + 3 * i);
                 }
 
                 mj_multiRay(mj_model_, mj_data_, pnt, ray_vecs_.data(), nullptr, 1, body_id,
@@ -461,32 +462,32 @@ public:
                     msg.data().resize(msg.row_step());
 
                     float max_distance = 10.0f;
-                    uint8_t* ptr = msg.data().data();
+                    LidarPoint* point_ptr = reinterpret_cast<LidarPoint*>(msg.data().data());
+                    
                     for (int i = 0; i < nray_; i++) {
-                        float   dist   = static_cast<float>(ray_dist_[i]);
-                        if (dist == -1.0f || dist > max_distance) {
-                            dist = max_distance;
+                        float dist = static_cast<float>(ray_dist_[i]);
+                        
+                        // Handle "No Hit" or Out of Range
+                        if (dist < 0 || dist > cutoff_) {
+                            dist = static_cast<float>(cutoff_);
                         }
-                        // std::cout<<"dist: "<<dist<<std::endl;
-                        float   vx     = static_cast<float>(local_ray_vecs_[i*3+0]);
-                        float   vy     = static_cast<float>(local_ray_vecs_[i*3+1]);
-                        float   vz     = static_cast<float>(local_ray_vecs_[i*3+2]);
-                        float   nx     = static_cast<float>(ray_normal_[i*3+0]);
-                        float   ny     = static_cast<float>(ray_normal_[i*3+1]);
-                        float   nz     = static_cast<float>(ray_normal_[i*3+2]);
 
-                        float x = dist * vx;
-                        float y = dist * vy;
-                        float z = dist * vz;
+                        // Point position in LIDAR frame (Local Ray * Distance)
+                        point_ptr[i].x = dist * static_cast<float>(local_ray_vecs_[i*3+0]);
+                        point_ptr[i].y = dist * static_cast<float>(local_ray_vecs_[i*3+1]);
+                        point_ptr[i].z = dist * static_cast<float>(local_ray_vecs_[i*3+2]);
+                        point_ptr[i].dist = dist;
 
-                        std::memcpy(ptr,      &x,      4);
-                        std::memcpy(ptr +  4, &y,      4);
-                        std::memcpy(ptr +  8, &z,      4);
-                        std::memcpy(ptr + 12, &dist,   4);
-                        std::memcpy(ptr + 16, &nx,     4);
-                        std::memcpy(ptr + 20, &ny,     4);
-                        std::memcpy(ptr + 24, &nz,     4);
-                        ptr += 28;
+                        // Transform Normal from Global back to Local
+                        mjtNum g_norm[3] = {ray_normal_[i*3], ray_normal_[i*3+1], ray_normal_[i*3+2]};
+                        mjtNum l_norm[3];
+                        
+                        // mju_mulMatTVec3 multiplies by the Transpose of site_xmat (Global -> Local)
+                        mju_mulMatTVec3(l_norm, site_xmat, g_norm);
+
+                        point_ptr[i].nx = static_cast<float>(l_norm[0]);
+                        point_ptr[i].ny = static_cast<float>(l_norm[1]);
+                        point_ptr[i].nz = static_cast<float>(l_norm[2]);
                     }
 
                     lidar_publisher_->Write(msg);
