@@ -255,7 +255,8 @@ protected:
 
     std::recursive_mutex* sim_mtx_;
 
-    std::shared_ptr<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>> lidar_publisher_;
+    std::shared_ptr<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>> front_lidar_publisher_;
+    std::shared_ptr<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>> rear_lidar_publisher_;
     std::shared_ptr<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>> camera_publisher_;
 
     // OpenGL rendering components for Camera
@@ -337,8 +338,11 @@ public:
         wireless_controller = std::make_unique<WirelessController_t>();
         wireless_controller->joystick = joystick;
 
-        lidar_publisher_ = std::make_shared<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>>("rt/mujoco/lidar");
-        lidar_publisher_->InitChannel();
+        front_lidar_publisher_ = std::make_shared<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>>("rt/mujoco/front_lidar");
+        front_lidar_publisher_->InitChannel();
+
+        rear_lidar_publisher_ = std::make_shared<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>>("rt/mujoco/rear_lidar");
+        rear_lidar_publisher_->InitChannel();
 
         camera_publisher_ = std::make_shared<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>>("rt/mujoco/front_camera_pointcloud");
         camera_publisher_->InitChannel();
@@ -432,7 +436,8 @@ public:
         if (mj_data_->time >= next_lidar_time_) {
             next_lidar_time_ = mj_data_->time + 1.0 / lidar_publish_rate_;
 
-            int body_id = mj_name2id(mj_model_, mjOBJ_SITE, "lidar_site");
+            int base_link_id = mj_name2id(mj_model_, mjOBJ_BODY, "base_link");
+            int body_id = mj_name2id(mj_model_, mjOBJ_SITE, "front_lidar_site");
 
             if (body_id >= 0) {
                 mjtNum pnt[3] = {
@@ -447,13 +452,13 @@ public:
                     mju_mulMatVec3(ray_vecs_.data() + 3 * i, site_xmat, local_ray_vecs_.data() + 3 * i);
                 }
 
-                mj_multiRay(mj_model_, mj_data_, pnt, ray_vecs_.data(), nullptr, 1, body_id,
+                mj_multiRay(mj_model_, mj_data_, pnt, ray_vecs_.data(), nullptr, 1, base_link_id,
                             ray_geomid_.data(), ray_dist_.data(), ray_normal_.data(), nray_, cutoff_);
 
-                if (lidar_publisher_) {
+                if (front_lidar_publisher_) {
                     sensor_msgs::msg::dds_::PointCloud2_ msg;
 
-                    msg.header().frame_id() = "lidar_link";
+                    msg.header().frame_id() = "front_lidar_link";
                     msg.header().stamp().sec()     = static_cast<int32_t>(mj_data_->time);
                     msg.header().stamp().nanosec() = static_cast<uint32_t>(
                         (mj_data_->time - msg.header().stamp().sec()) * 1e9);
@@ -512,7 +517,91 @@ public:
                         point_ptr[i].nz = static_cast<float>(l_norm[2]);
                     }
 
-                    lidar_publisher_->Write(msg);
+                    front_lidar_publisher_->Write(msg);
+                }
+            }
+
+            body_id = mj_name2id(mj_model_, mjOBJ_SITE, "rear_lidar_site");
+
+            if (body_id >= 0) {
+                mjtNum pnt[3] = {
+                    mj_data_->site_xpos[3 * body_id + 0],
+                    mj_data_->site_xpos[3 * body_id + 1],
+                    mj_data_->site_xpos[3 * body_id + 2]
+                };
+
+                // Rotate local ray directions to global for mj_multiRay
+                mjtNum* site_xmat = mj_data_->site_xmat + 9 * body_id;
+                for (int i = 0; i < nray_; i++) {
+                    mju_mulMatVec3(ray_vecs_.data() + 3 * i, site_xmat, local_ray_vecs_.data() + 3 * i);
+                }
+
+                mj_multiRay(mj_model_, mj_data_, pnt, ray_vecs_.data(), nullptr, 1, base_link_id,
+                            ray_geomid_.data(), ray_dist_.data(), ray_normal_.data(), nray_, cutoff_);
+
+                if (rear_lidar_publisher_) {
+                    sensor_msgs::msg::dds_::PointCloud2_ msg;
+
+                    msg.header().frame_id() = "rear_lidar_link";
+                    msg.header().stamp().sec()     = static_cast<int32_t>(mj_data_->time);
+                    msg.header().stamp().nanosec() = static_cast<uint32_t>(
+                        (mj_data_->time - msg.header().stamp().sec()) * 1e9);
+
+                    msg.height()       = 1;
+                    msg.width()        = nray_;
+                    msg.is_dense()     = false;
+                    msg.is_bigendian() = false;
+
+                    msg.fields().resize(7);
+                    auto set_field = [&](int idx, const std::string& name,
+                                        uint32_t offset, uint8_t datatype) {
+                        msg.fields()[idx].name()     = name;
+                        msg.fields()[idx].offset()   = offset;
+                        msg.fields()[idx].datatype() = datatype;
+                        msg.fields()[idx].count()    = 1;
+                    };
+                    set_field(0, "x",       0,  7); // FLOAT32
+                    set_field(1, "y",       4,  7);
+                    set_field(2, "z",       8,  7);
+                    set_field(3, "dist",   12,  7);
+                    set_field(4, "nx",     16,  7);
+                    set_field(5, "ny",     20,  7);
+                    set_field(6, "nz",     24,  7);
+
+                    msg.point_step() = 28;
+                    msg.row_step()   = nray_ * msg.point_step();
+                    msg.data().resize(msg.row_step());
+
+                    float max_distance = 10.0f;
+                    LidarPoint* point_ptr = reinterpret_cast<LidarPoint*>(msg.data().data());
+                    
+                    for (int i = 0; i < nray_; i++) {
+                        float dist = static_cast<float>(ray_dist_[i]);
+                        
+                        // Handle "No Hit" or Out of Range
+                        if (dist < 0 || dist > cutoff_) {
+                            dist = static_cast<float>(cutoff_);
+                        }
+
+                        // Point position in LIDAR frame (Local Ray * Distance)
+                        point_ptr[i].x = dist * static_cast<float>(local_ray_vecs_[i*3+0]);
+                        point_ptr[i].y = dist * static_cast<float>(local_ray_vecs_[i*3+1]);
+                        point_ptr[i].z = dist * static_cast<float>(local_ray_vecs_[i*3+2]);
+                        point_ptr[i].dist = dist;
+
+                        // Transform Normal from Global back to Local
+                        mjtNum g_norm[3] = {ray_normal_[i*3], ray_normal_[i*3+1], ray_normal_[i*3+2]};
+                        mjtNum l_norm[3];
+                        
+                        // mju_mulMatTVec3 multiplies by the Transpose of site_xmat (Global -> Local)
+                        mju_mulMatTVec3(l_norm, site_xmat, g_norm);
+
+                        point_ptr[i].nx = static_cast<float>(l_norm[0]);
+                        point_ptr[i].ny = static_cast<float>(l_norm[1]);
+                        point_ptr[i].nz = static_cast<float>(l_norm[2]);
+                    }
+
+                    rear_lidar_publisher_->Write(msg);
                 }
             }
         }
