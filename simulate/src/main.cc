@@ -342,6 +342,9 @@ namespace
     // run until asked to exit
     while (!sim.exitrequest.load())
     {
+
+      // We will generally never use droploadrequest or uiloadrequest, so ignore this for now. //
+      ///////////////////////////////////////////////////////////////////////////////////////////
       if (sim.droploadrequest.load())
       {
         sim.LoadMessage(sim.dropfilename);
@@ -403,6 +406,8 @@ namespace
         }
       }
 
+      ///////////////////////////////////////////////////////////////////////////////////////////
+
       // sleep for 1 ms or yield, to let main thread run
       //  yield results in busy wait - which has better timing but kills battery life
       if (sim.run && sim.busywait)
@@ -411,17 +416,20 @@ namespace
       }
       else
       {
+        // We sleep or yield to allow the rendering thread to run, otherwise the physics will use all the CPU and starve the renderer 
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
 
       {
         // lock the sim mutex
+        // mutex protects the model m and data d
         const std::unique_lock<std::recursive_mutex> lock(sim.mtx);
 
         // run only if model is present
         if (m)
         {
           // running
+          // checks if sim is paused through spacebar, 0 if paused 1 if running
           if (sim.run)
           {
             bool stepped = false;
@@ -471,51 +479,38 @@ namespace
               stepped = true;
             }
 
-            // in-sync: step until ahead of cpu
+            // sim time mode: one step per loop iteration.
+            // Step once, then wait if sim is ahead of wall time so we never
+            // run faster than real time. If sim is slow, we just run slow —
+            // the /clock drives all ROS nodes so they slow down too.
             else
             {
-              bool measured = false;
-              mjtNum prevSim = d->time;
-
-              double refreshTime = simRefreshFraction / sim.refresh_rate;
-
-              // step while sim lags behind cpu and within refreshTime
-              while (Seconds((d->time - syncSim) * slowdown) < mj::Simulate::Clock::now() - syncCPU &&
-                     mj::Simulate::Clock::now() - startCPU < Seconds(refreshTime))
+              // elastic band on base link
+              if (param::config.enable_elastic_band == 1)
               {
-                // measure slowdown before first step
-                if (!measured && elapsedSim)
+                if (elastic_band.enable_)
                 {
-                  sim.measured_slowdown =
-                      std::chrono::duration<double>(elapsedCPU).count() / elapsedSim;
-                  measured = true;
+                  std::vector<double> x = {d->qpos[0], d->qpos[1], d->qpos[2]};
+                  std::vector<double> dx = {d->qvel[0], d->qvel[1], d->qvel[2]};
+
+                  elastic_band.Advance(x, dx);
+
+                  d->xfrc_applied[param::config.band_attached_link] = elastic_band.f_[0];
+                  d->xfrc_applied[param::config.band_attached_link + 1] = elastic_band.f_[1];
+                  d->xfrc_applied[param::config.band_attached_link + 2] = elastic_band.f_[2];
                 }
+              }
 
-                // elastic band on base link
-                if (param::config.enable_elastic_band == 1)
-                {
-                  if (elastic_band.enable_)
-                  {
-                    std::vector<double> x = {d->qpos[0], d->qpos[1], d->qpos[2]};
-                    std::vector<double> dx = {d->qvel[0], d->qvel[1], d->qvel[2]};
+              mj_step(m, d);
+              stepped = true;
 
-                    elastic_band.Advance(x, dx);
-
-                    d->xfrc_applied[param::config.band_attached_link] = elastic_band.f_[0];
-                    d->xfrc_applied[param::config.band_attached_link + 1] = elastic_band.f_[1];
-                    d->xfrc_applied[param::config.band_attached_link + 2] = elastic_band.f_[2];
-                  }
-                }
-
-                // call mj_step
-                mj_step(m, d);
-                stepped = true;
-
-                // break if reset
-                if (d->time < prevSim)
-                {
-                  break;
-                }
+              // If sim is ahead of wall time, sleep until they're aligned.
+              // This prevents running faster than real time.
+              double simAhead = (d->time - syncSim) * slowdown
+                                - Seconds(mj::Simulate::Clock::now() - syncCPU).count();
+              if (simAhead > 0)
+              {
+                std::this_thread::sleep_for(Seconds(simAhead));
               }
             }
 
@@ -651,6 +646,7 @@ int main(int argc, char **argv)
 
   setenv("MUJOCO_GL", "egl", 1);
 
+
   // display an error if running on macOS under Rosetta 2
 #if defined(__APPLE__) && defined(__AVX__)
   if (rosetta_error_msg)
@@ -695,6 +691,11 @@ int main(int argc, char **argv)
   }
   param::helper(filtered_argc, argv);
 
+  // Override robot_scene if passed as a positional argument from the ROS 2 launch file
+  if (filtered_argc > 1 && argv[1][0] != '-') {
+    param::config.robot_scene = argv[1];
+  }
+
   if(param::config.robot_scene.is_relative()) {
     std::string a2_description_share = ament_index_cpp::get_package_share_directory("a2_description");
     std::filesystem::path scene_path = std::filesystem::path(a2_description_share) / "mjcf" / param::config.robot_scene;
@@ -713,6 +714,10 @@ int main(int argc, char **argv)
   auto sim = std::make_unique<mj::Simulate>(
     std::make_unique<mj::GlfwAdapter>(),
     &cam, &opt, &pert, /* is_passive = */ false);
+
+  // hide the side panels in the mujoco window
+  sim->ui0_enable = false;
+  sim->ui1_enable = false;
 
   // Create a hidden window for offscreen rendering on the bridge thread
   GLFWwindow* main_window = static_cast<mj::GlfwAdapter*>(sim->platform_ui.get())->window_;
