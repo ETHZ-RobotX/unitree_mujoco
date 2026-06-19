@@ -440,6 +440,7 @@ protected:
         const char* site_name;
         const char* frame_id;
         std::shared_ptr<unitree::robot::ChannelPublisher<sensor_msgs::msg::dds_::PointCloud2_>> publisher;
+        double min_range = 0.0;  // per-lidar min range (m): rays closer than this are dropped
     };
 
     // function that takes the output of mj_multiRay, converts it into a pointcloud and publishes it
@@ -485,7 +486,7 @@ protected:
         #pragma omp parallel for schedule(static)
         for (int i = 0; i < nray_; i++) {
             float dist = static_cast<float>(state.ray_dist[i]);
-            valid_flags[i] = (dist >= 0 && dist <= cutoff_) ? 1 : 0;
+            valid_flags[i] = (dist >= cfg.min_range && dist <= cutoff_) ? 1 : 0;
         }
 
         // Finding total valid rays using a cumulative sum, to avoid race conditions
@@ -697,11 +698,14 @@ public:
 
             int base_link_id = mj_name2id(mj_model_, mjOBJ_BODY, "base_link");
 
-            LidarConfig front_cfg{"front_lidar_site", "front_lidar_link", front_lidar_publisher_};
+            // Last field is the per-lidar minimum range (m): rays closer than
+            // this are dropped (tune to reject self-hits on the body; front and
+            // rear can differ). 0.0 = no min filter.
+            LidarConfig front_cfg{"front_lidar_site", "front_lidar_link", front_lidar_publisher_, 0.0};
             ProcessLidar(front_cfg, front_lidar_state_, base_link_id);
 
-            // LidarConfig rear_cfg{"rear_lidar_site", "rear_lidar_link", rear_lidar_publisher_};
-            // ProcessLidar(rear_cfg, rear_lidar_state_, base_link_id);
+            LidarConfig rear_cfg{"rear_lidar_site", "rear_lidar_link", rear_lidar_publisher_, 0.45};
+            ProcessLidar(rear_cfg, rear_lidar_state_, base_link_id);
         }
         if (mj_data_->time >= next_camera_time_) {
             next_camera_time_ = mj_data_->time + 1.0 / camera_publish_rate_;
