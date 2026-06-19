@@ -12,3 +12,8 @@ joystick_bits: 16 # Some game controllers may only have 8-bit accuracy
 print_scene_information: 1 # Print link, joint and sensors information of robot
 
 enable_elastic_band: 0 # Virtual spring band, used for lifting h1
+
+# Sim sensor toggles
+enable_front_lidar: 1 # 1 = front lidar on (default), 0 = off
+enable_rear_lidar: 0  # 0 = rear lidar off (default), 1 = on
+enable_camera: 1      # 1 = front camera on (default), 0 = off

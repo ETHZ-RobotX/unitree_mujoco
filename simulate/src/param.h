@@ -26,6 +26,10 @@ inline struct SimulationConfig
     int enable_elastic_band;
     int band_attached_link = 0;
 
+    int enable_front_lidar = 1;  // 1 = raycast + publish the front lidar (default on)
+    int enable_rear_lidar  = 0;  // 0 = rear lidar off (default); 1 = raycast + publish the rear lidar
+    int enable_camera      = 1;  // 1 = render + publish the front camera (default on)
+
     void load_from_yaml(const std::string &filename)
     {
         auto cfg = YAML::LoadFile(filename);
@@ -41,6 +45,11 @@ inline struct SimulationConfig
             joystick_bits = cfg["joystick_bits"].as<int>();
             print_scene_information = cfg["print_scene_information"].as<int>();
             enable_elastic_band = cfg["enable_elastic_band"].as<int>();
+            // Optional sensor toggles (default to their built-in values) so
+            // existing config.yaml files stay valid.
+            enable_front_lidar = cfg["enable_front_lidar"] ? cfg["enable_front_lidar"].as<int>() : 1;
+            enable_rear_lidar  = cfg["enable_rear_lidar"]  ? cfg["enable_rear_lidar"].as<int>()  : 0;
+            enable_camera      = cfg["enable_camera"]      ? cfg["enable_camera"].as<int>()      : 1;
         }
         catch(const std::exception& e)
         {

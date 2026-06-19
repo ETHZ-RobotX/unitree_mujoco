@@ -700,14 +700,19 @@ public:
 
             // Last field is the per-lidar minimum range (m): rays closer than
             // this are dropped (tune to reject self-hits on the body; front and
-            // rear can differ). 0.0 = no min filter.
-            LidarConfig front_cfg{"front_lidar_site", "front_lidar_link", front_lidar_publisher_, 0.0};
-            ProcessLidar(front_cfg, front_lidar_state_, base_link_id);
+            // rear can differ). 0.0 = no min filter. Each lidar is toggled in
+            // config.yaml (front on by default, rear off by default).
+            if (param::config.enable_front_lidar) {
+                LidarConfig front_cfg{"front_lidar_site", "front_lidar_link", front_lidar_publisher_, 0.0};
+                ProcessLidar(front_cfg, front_lidar_state_, base_link_id);
+            }
 
-            LidarConfig rear_cfg{"rear_lidar_site", "rear_lidar_link", rear_lidar_publisher_, 0.45};
-            ProcessLidar(rear_cfg, rear_lidar_state_, base_link_id);
+            if (param::config.enable_rear_lidar) {
+                LidarConfig rear_cfg{"rear_lidar_site", "rear_lidar_link", rear_lidar_publisher_, 0.45};
+                ProcessLidar(rear_cfg, rear_lidar_state_, base_link_id);
+            }
         }
-        if (mj_data_->time >= next_camera_time_) {
+        if (param::config.enable_camera && mj_data_->time >= next_camera_time_) {
             next_camera_time_ = mj_data_->time + 1.0 / camera_publish_rate_;
 
             int cam_id = mj_name2id(mj_model_, mjOBJ_CAMERA, "front_camera");
