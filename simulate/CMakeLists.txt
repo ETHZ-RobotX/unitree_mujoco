@@ -52,6 +52,8 @@ target_link_libraries(unitree_mujoco
   pthread # Note: Using target_link_libraries is preferred over link_libraries in ROS 2
   mujoco
   glfw
+  EGL
+  GL
   yaml-cpp
   unitree_sdk2
   boost_program_options

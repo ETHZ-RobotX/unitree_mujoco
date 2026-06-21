@@ -29,6 +29,8 @@
 #include <string>
 #include <thread>
 #include <filesystem>
+#include <atomic>
+#include <csignal>
 
 #include <mujoco/mujoco.h>
 #include "simulate.h"
@@ -55,6 +57,15 @@ extern "C"
 }
 
 GLFWwindow* g_offscreen_window = nullptr;
+
+// Headless: render the camera via offscreen EGL instead of a GLFW window.
+bool g_headless_egl = false;
+
+// Headless mode (UNITREE_MUJOCO_HEADLESS=1): run physics + the Unitree SDK bridge
+// with no GUI, no GL, and no display — visualize in RViz/Foxglove instead.
+// g_headless_exit is set by SIGINT/SIGTERM so the physics loop shuts down cleanly.
+std::atomic<bool> g_headless_exit{false};
+static void headless_signal_handler(int) { g_headless_exit.store(true); }
 
 class ElasticBand
 {
@@ -703,12 +714,84 @@ int main(int argc, char **argv)
   }
 
   // --- Prevent Unitree DDS vs ROS 2 DDS Conflicts ---
-  // Disable Iceoryx shared memory in CycloneDDS to prevent memory corruption crashes
-  setenv("CYCLONEDDS_URI", "<CycloneDDS><Domain><Iceoryx><Enable>false</Enable></Iceoryx><SharedMemory><Enable>false</Enable></SharedMemory></Domain></CycloneDDS>", 1);
+  // Disable Iceoryx shared memory in CycloneDDS to prevent memory corruption crashes.
+  // Also cap RTPS datagrams just under 64KB (MaxMessageSize) so large samples — the
+  // front lidar PointCloud2 is ~46k points — fragment at the DDS layer instead of
+  // relying on fragile IP fragmentation over loopback, and request a big RX buffer
+  // (SocketReceiveBufferSize, capped by net.core.rmem_max — raise it with
+  // scripts/setup/setup-network-host.sh) plus writer flow control (WhcHigh). This
+  // setenv overrides any file CYCLONEDDS_URI, so the tuning MUST live here, not just
+  // in config/cyclonedds/cyclonedds.*.xml. Keep both in sync.
+  setenv("CYCLONEDDS_URI", "<CycloneDDS><Domain><General><MaxMessageSize>65500B</MaxMessageSize></General><Internal><SocketReceiveBufferSize min=\"10MB\"/><Watermarks><WhcHigh>500kB</WhcHigh></Watermarks></Internal><Iceoryx><Enable>false</Enable></Iceoryx><SharedMemory><Enable>false</Enable></SharedMemory></Domain></CycloneDDS>", 1);
   // Clear ROS 2 environment variables that might confuse Unitree's built-in DDS
   unsetenv("ROS_DISTRO");
   unsetenv("AMENT_PREFIX_PATH");
   unsetenv("CMAKE_PREFIX_PATH");
+
+  // ---- Headless mode (no GUI window) --------------------------------------
+  // Enabled with UNITREE_MUJOCO_HEADLESS=1. Runs physics + the Unitree SDK bridge
+  // (lowstate, lidar, and the camera via offscreen EGL). Visualize in RViz/Foxglove
+  // — no X server / VNC required. When unset, the unchanged GUI path below runs.
+  if (const char* hl = std::getenv("UNITREE_MUJOCO_HEADLESS");
+      hl && (std::string(hl) == "1" || std::string(hl) == "true"))
+  {
+    std::printf("unitree_mujoco: HEADLESS mode (no viewer) — visualize in RViz/Foxglove\n");
+    g_headless_egl = true;
+    std::signal(SIGINT, headless_signal_handler);
+    std::signal(SIGTERM, headless_signal_handler);
+
+    // Load + compile the model directly (no Simulate/GLFW needed).
+    char loadError[kErrorLength] = "";
+    m = mj_loadXML(param::config.robot_scene.c_str(), nullptr, loadError, kErrorLength);
+    if (!m)
+    {
+      std::printf("unitree_mujoco: failed to load %s\n  %s\n",
+                  param::config.robot_scene.c_str(), loadError);
+      return 1;
+    }
+    d = mj_makeData(m);
+    mj_forward(m, d);
+
+    free(ctrlnoise);
+    ctrlnoise = static_cast<mjtNum *>(malloc(sizeof(mjtNum) * m->nu));
+    mju_zero(ctrlnoise, m->nu);
+
+    // Bridge thread publishes lowstate + lidar (reads m/d under this mutex).
+    static std::recursive_mutex headless_mtx;
+    std::thread unitree_thread(UnitreeSdk2BridgeThread, &headless_mtx);
+    unitree_thread.detach();
+
+    // Real-time physics loop at 100% real time. If it can't keep up it just runs
+    // slow — the /clock then slows all ROS nodes too.
+    auto wall0 = std::chrono::steady_clock::now();
+    double sim0 = d->time;
+    while (!g_headless_exit.load())
+    {
+      {
+        const std::unique_lock<std::recursive_mutex> lock(headless_mtx);
+        mj_step(m, d);
+      }
+      const double ahead = (d->time - sim0) -
+          std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
+      if (ahead > 0)
+      {
+        std::this_thread::sleep_for(std::chrono::duration<double>(ahead));
+      }
+      else if (ahead < -0.1)
+      {
+        // Fell >0.1 s behind real time — re-baseline so we don't sprint to catch up.
+        sim0 = d->time;
+        wall0 = std::chrono::steady_clock::now();
+      }
+    }
+
+    std::printf("unitree_mujoco: headless exit\n");
+    free(ctrlnoise);
+    mj_deleteData(d);
+    mj_deleteModel(m);
+    return 0;
+  }
+  // ---- end headless -------------------------------------------------------
 
   // simulate object encapsulates the UI
   auto sim = std::make_unique<mj::Simulate>(

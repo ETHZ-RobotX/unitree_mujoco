@@ -2,6 +2,8 @@
 
 #include <mujoco/mujoco.h>
 #include <GLFW/glfw3.h>
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
 
 #include <unitree/robot/channel/channel_publisher.hpp>
 #include <unitree/robot/channel/channel_subscriber.hpp>
@@ -23,6 +25,7 @@
 #include "physics_joystick.h"
 
 extern GLFWwindow* g_offscreen_window;
+extern bool g_headless_egl;
 
 #define MOTOR_SENSOR_NUM 3
 
@@ -407,6 +410,42 @@ protected:
     mjvCamera front_cam_ = {};
     mjvOption opt_ = {};
     bool gl_initialized_ = false;
+    bool gl_failed_ = false;
+    EGLDisplay egl_dpy_ = EGL_NO_DISPLAY;
+    EGLContext egl_ctx_ = EGL_NO_CONTEXT;
+
+    // Offscreen GL context with no window/display, current on this thread.
+    bool initEGL() {
+        auto getPlatformDisplay = reinterpret_cast<PFNEGLGETPLATFORMDISPLAYEXTPROC>(
+            eglGetProcAddress("eglGetPlatformDisplayEXT"));
+        if (getPlatformDisplay)
+            egl_dpy_ = getPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, nullptr);
+        if (egl_dpy_ == EGL_NO_DISPLAY)
+            egl_dpy_ = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+        EGLint major, minor;
+        if (egl_dpy_ == EGL_NO_DISPLAY || !eglInitialize(egl_dpy_, &major, &minor)) {
+            std::cerr << "unitree_mujoco: EGL init failed; camera disabled" << std::endl;
+            return false;
+        }
+        const EGLint cfgAttribs[] = {
+            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
+            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_DEPTH_SIZE, 24,
+            EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE};
+        EGLConfig cfg;
+        EGLint num = 0;
+        if (!eglChooseConfig(egl_dpy_, cfgAttribs, &cfg, 1, &num) || num < 1 ||
+            !eglBindAPI(EGL_OPENGL_API)) {
+            std::cerr << "unitree_mujoco: EGL config failed; camera disabled" << std::endl;
+            return false;
+        }
+        egl_ctx_ = eglCreateContext(egl_dpy_, cfg, EGL_NO_CONTEXT, nullptr);
+        if (egl_ctx_ == EGL_NO_CONTEXT ||
+            !eglMakeCurrent(egl_dpy_, EGL_NO_SURFACE, EGL_NO_SURFACE, egl_ctx_)) {
+            std::cerr << "unitree_mujoco: EGL context failed; camera disabled" << std::endl;
+            return false;
+        }
+        return true;
+    }
 
     // Lidar buffers
     int h_samples_ = 360;
@@ -712,31 +751,36 @@ public:
                 ProcessLidar(rear_cfg, rear_lidar_state_, base_link_id);
             }
         }
-        if (param::config.enable_camera && mj_data_->time >= next_camera_time_) {
+        // Camera is GL-rendered: GLFW window in GUI mode, offscreen EGL in headless.
+        const bool gl_available = (g_offscreen_window != nullptr) || g_headless_egl;
+        if (param::config.enable_camera && gl_available && !gl_failed_ &&
+            mj_data_->time >= next_camera_time_) {
             next_camera_time_ = mj_data_->time + 1.0 / camera_publish_rate_;
 
             int cam_id = mj_name2id(mj_model_, mjOBJ_CAMERA, "front_camera");
 
-            if (g_offscreen_window) {
-                glfwMakeContextCurrent(g_offscreen_window);
-            }
-
             if (!gl_initialized_) {
-                // This ensures the GPU context is tied to the current bridge thread
+                if (g_headless_egl) {
+                    if (!initEGL()) { gl_failed_ = true; return; }
+                } else {
+                    glfwMakeContextCurrent(g_offscreen_window);
+                }
                 mjv_defaultScene(&scn_);
-                mjv_makeScene(mj_model_, &scn_, 2000); 
+                mjv_makeScene(mj_model_, &scn_, 2000);
 
                 mjr_defaultContext(&con_);
                 mjr_makeContext(mj_model_, &con_, mjFONTSCALE_150);
                 mjr_setBuffer(mjFB_OFFSCREEN, &con_);
-                
+
                 mjv_defaultOption(&opt_);
                 mjv_defaultCamera(&front_cam_);
-                
+
                 gl_initialized_ = true;
                 std::cout << "Camera Rendering Context Initialized in Bridge Thread." << std::endl;
+            } else if (!g_headless_egl) {
+                glfwMakeContextCurrent(g_offscreen_window);
             }
-            
+
             if (cam_id >= 0 && camera_publisher_) {
                 int width = 640;
                 int height = 480;
