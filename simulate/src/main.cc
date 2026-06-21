@@ -728,11 +728,10 @@ int main(int argc, char **argv)
   unsetenv("AMENT_PREFIX_PATH");
   unsetenv("CMAKE_PREFIX_PATH");
 
-  // ---- Headless mode (no GUI, no GL, no display) --------------------------
+  // ---- Headless mode (no GUI window) --------------------------------------
   // Enabled with UNITREE_MUJOCO_HEADLESS=1. Runs physics + the Unitree SDK bridge
-  // (lowstate + lidar; the camera is auto-skipped because g_offscreen_window stays
-  // null). Visualize in RViz/Foxglove instead of the MuJoCo window — so no X
-  // server / VNC is required. When unset, the unchanged GUI path below runs.
+  // (lowstate, lidar, and the camera via offscreen EGL). Visualize in RViz/Foxglove
+  // — no X server / VNC required. When unset, the unchanged GUI path below runs.
   if (const char* hl = std::getenv("UNITREE_MUJOCO_HEADLESS");
       hl && (std::string(hl) == "1" || std::string(hl) == "true"))
   {
