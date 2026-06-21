@@ -58,6 +58,9 @@ extern "C"
 
 GLFWwindow* g_offscreen_window = nullptr;
 
+// Headless: render the camera via offscreen EGL instead of a GLFW window.
+bool g_headless_egl = false;
+
 // Headless mode (UNITREE_MUJOCO_HEADLESS=1): run physics + the Unitree SDK bridge
 // with no GUI, no GL, and no display — visualize in RViz/Foxglove instead.
 // g_headless_exit is set by SIGINT/SIGTERM so the physics loop shuts down cleanly.
@@ -734,6 +737,7 @@ int main(int argc, char **argv)
       hl && (std::string(hl) == "1" || std::string(hl) == "true"))
   {
     std::printf("unitree_mujoco: HEADLESS mode (no viewer) — visualize in RViz/Foxglove\n");
+    g_headless_egl = true;
     std::signal(SIGINT, headless_signal_handler);
     std::signal(SIGTERM, headless_signal_handler);
 
