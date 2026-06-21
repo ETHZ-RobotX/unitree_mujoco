@@ -712,14 +712,16 @@ public:
                 ProcessLidar(rear_cfg, rear_lidar_state_, base_link_id);
             }
         }
-        if (param::config.enable_camera && mj_data_->time >= next_camera_time_) {
+        // The camera is GL-rendered; skip it when disabled in config, and also
+        // in headless mode (no offscreen window → no GL context), otherwise
+        // mjr_makeContext below crashes. The lidar above is CPU-raytraced and
+        // runs regardless.
+        if (param::config.enable_camera && g_offscreen_window && mj_data_->time >= next_camera_time_) {
             next_camera_time_ = mj_data_->time + 1.0 / camera_publish_rate_;
 
             int cam_id = mj_name2id(mj_model_, mjOBJ_CAMERA, "front_camera");
 
-            if (g_offscreen_window) {
-                glfwMakeContextCurrent(g_offscreen_window);
-            }
+            glfwMakeContextCurrent(g_offscreen_window);
 
             if (!gl_initialized_) {
                 // This ensures the GPU context is tied to the current bridge thread
