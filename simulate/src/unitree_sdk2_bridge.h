@@ -27,6 +27,11 @@
 extern GLFWwindow* g_offscreen_window;
 extern bool g_headless_egl;
 
+extern bool g_ll_cmd_ready;
+extern std::mutex g_cmd_ready_mutex;
+extern std::condition_variable g_ll_cmd_cv;
+
+
 #define MOTOR_SENSOR_NUM 3
 
 struct LidarPoint {
@@ -838,9 +843,34 @@ public:
 
 private:
     unitree::common::RecurrentThreadPtr thread_;
+
 };
 
-using Go2Bridge = RobotBridge<unitree::robot::go2::subscription::LowCmd, unitree::robot::go2::publisher::LowState>;
+class LowCmdSync : public unitree::robot::SubscriptionBase<unitree_go::msg::dds_::LowCmd_>
+{
+public:
+  using SharedPtr = std::shared_ptr<LowCmdSync>;
+
+  LowCmdSync(std::string topic = "rt/lowcmd") : SubscriptionBase<MsgType>(topic) {}
+
+protected:
+  void post_communication() {
+    {
+      std::lock_guard<std::mutex> guard(g_cmd_ready_mutex);
+      g_ll_cmd_ready = true;
+    }
+    g_ll_cmd_cv.notify_one();
+    // Notifies when the message arrives. Hence the condition variable to run
+    // physics should be here
+    // auto now = std::chrono::system_clock::now();
+    // auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    //     now.time_since_epoch()
+    // ).count();
+    // std::cout << "Message arrived from loco: " << ms << " ms\n";
+  }
+};
+
+using Go2Bridge = RobotBridge<LowCmdSync, unitree::robot::go2::publisher::LowState>;
 
 class G1Bridge : public RobotBridge<unitree::robot::g1::subscription::LowCmd, unitree::robot::g1::publisher::LowState>
 {
