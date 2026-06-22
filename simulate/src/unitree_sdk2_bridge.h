@@ -665,9 +665,13 @@ public:
             std::lock_guard<std::mutex> lock(lowcmd->mutex_);
             for(int i(0); i < num_motor_; i++) {
                 auto & m = lowcmd->msg_.motor_cmd()[i];
-                mj_data_->ctrl[i] = m.tau() +
+                mjtNum tau = m.tau() +
                                     m.kp() * (m.q() - mj_data_->sensordata[i]) +
                                     m.kd() * (m.dq() - mj_data_->sensordata[i + num_motor_]);
+                mjtNum lo = mj_model_->actuator_forcerange[2*i];
+                mjtNum hi = mj_model_->actuator_forcerange[2*i + 1];
+                if (hi > lo) tau = std::clamp(tau, lo, hi);
+                mj_data_->ctrl[i] = tau;
             }
         }
 

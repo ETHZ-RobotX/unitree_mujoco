@@ -67,6 +67,10 @@ bool g_headless_egl = false;
 std::atomic<bool> g_headless_exit{false};
 static void headless_signal_handler(int) { g_headless_exit.store(true); }
 
+bool g_ll_cmd_ready{false};
+std::mutex g_cmd_ready_mutex;
+std::condition_variable g_ll_cmd_cv;
+
 class ElasticBand
 {
 public:
@@ -427,7 +431,7 @@ namespace
       }
       else
       {
-        // We sleep or yield to allow the rendering thread to run, otherwise the physics will use all the CPU and starve the renderer 
+        // We sleep or yield to allow the rendering thread to run, otherwise the physics will use all the CPU and starve the renderer
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
 
@@ -510,6 +514,13 @@ namespace
                   d->xfrc_applied[param::config.band_attached_link + 1] = elastic_band.f_[1];
                   d->xfrc_applied[param::config.band_attached_link + 2] = elastic_band.f_[2];
                 }
+              }
+
+              {
+                std::unique_lock<std::mutex> g(g_cmd_ready_mutex);
+                // g_ll_cmd_cv.wait_for(g_cmd_ready_mutex, std, Predicate p)
+                g_ll_cmd_cv.wait(g, [] { return g_ll_cmd_ready; });
+                g_ll_cmd_ready = false;
               }
 
               mj_step(m, d);
@@ -782,6 +793,12 @@ int main(int argc, char **argv)
         // Fell >0.1 s behind real time — re-baseline so we don't sprint to catch up.
         sim0 = d->time;
         wall0 = std::chrono::steady_clock::now();
+      }
+      {
+        std::unique_lock<std::mutex> g(g_cmd_ready_mutex);
+        // g_ll_cmd_cv.wait_for(g_cmd_ready_mutex, std, Predicate p)
+        g_ll_cmd_cv.wait(g, [] { return g_ll_cmd_ready; });
+        g_ll_cmd_ready = false;
       }
     }
 
